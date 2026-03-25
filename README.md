@@ -214,3 +214,9 @@ MIT
 NVIDIA Inception Member | Building AI compliance tools for defense contractors
 
 Built during the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition. [Issue #396](https://github.com/karpathy/autoresearch/issues/396) on karpathy/autoresearch was filed during this same adventure.
+
+---
+
+### Related
+
+- **[Parameter Golf Experiment Lab](https://github.com/NathanMaine/parameter-golf-experiment-lab)** — Interactive dashboard visualizing 352 submissions and 46+ experiments from the competition

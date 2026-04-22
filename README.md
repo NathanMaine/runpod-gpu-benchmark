@@ -213,6 +213,78 @@ A 30-second benchmark could have saved a meaningful fraction of the last row.
 
 9. **If your code uses FA3, check the target GPU first.** FA3 is Hopper-only in the shipping binaries. Blackwell (RTX 5090, GB10 DGX Spark, B200 where FA3 support is still rolling out) needs FA2 or SDPA. See the Blackwell section above.
 
+## Finding a specific GPU again
+
+If a pod turns out to be exceptional, the script now captures everything you need to request the same hardware later. It writes two things:
+
+1. A **GPU FINGERPRINT** block to stdout with pod id, datacenter, per-GPU UUID and serial, and the actual GEMM and memory bandwidth numbers.
+2. A **JSON sidecar** (default `/tmp/pod-benchmark-<timestamp>.json`, override with `JSON_OUT=path.json`) containing the same data in a machine-readable form.
+
+Save these alongside your training logs so you can cross-reference later.
+
+### What's captured
+
+```
+pod_id=<runpod pod id, e.g. a8f3c2b1e7>
+pod_dc_id=<datacenter, e.g. EUR-IS-1>
+pod_public_ip=<ip:port>
+pod_location=<city, region, country>
+gemm_tflops=<measured>
+mem_bw_gbs=<measured>
+gpu[0]: name="NVIDIA H100 80GB HBM3" serial=<13-digit> uuid=GPU-<hex uuid> pci=<bus id>
+gpu[1]: ...
+...
+```
+
+UUID is unique to the physical GPU. Two rentals with the same UUID mean you got the same card back.
+
+### The realistic workflow
+
+RunPod does not let you request a specific GPU by UUID directly. What you can do:
+
+1. **From the fingerprint**, note the `pod_dc_id` and the GPU model that gave you the performance you want. These are the levers you have.
+2. **Rent a pod in that specific datacenter** with the same GPU type. Use the RunPod CLI or API with `--dataCenterId` pinning:
+   ```bash
+   runpodctl pod create \
+     --name "chasing-good-gpu" \
+     --gpu "NVIDIA H100 80GB HBM3" \
+     --gpuCount 8 \
+     --dataCenterId "EUR-IS-1" \
+     --templateId "<your PyTorch template>"
+   ```
+3. **Run this benchmark** on the new pod. Compare the fingerprint JSON to your saved one.
+4. **If the UUID matches**, keep the pod. That's the same physical card.
+5. **If the UUID does not match but performance is equivalent**, this is a peer card in the same DC. Often good enough.
+6. **If performance is degraded**, stop the pod and retry. RunPod charges by the minute, so this loop costs about $0.10 per attempt on a single H100 and $0.35 per attempt on an 8xH100.
+
+### Listing available datacenters
+
+```bash
+runpodctl dc list                    # human table
+runpodctl dc list -o json            # machine readable
+runpodctl gpu list --include-unavailable   # what GPU types exist where
+```
+
+The `dc_id` field from the sidecar maps directly to the `--dataCenterId` flag.
+
+### Building a personal "known good pods" registry
+
+Once you have a handful of benchmarks saved:
+
+```bash
+# Find all your sidecar files
+ls -1 /tmp/pod-benchmark-*.json ~/bench-archive/*.json
+
+# Pull out every UUID and its measured TFLOPS
+jq -r '[.timestamp, .runpod.dc_id, .gpus[0].uuid, .gemm.tflops] | @tsv' \
+    /tmp/pod-benchmark-*.json 2>/dev/null | sort -k4 -nr
+
+# Or grep if jq isn't installed
+grep -H "uuid\|tflops" /tmp/pod-benchmark-*.json
+```
+
+Over enough rentals, you will start to see specific UUIDs reappear — those are your known-good targets, and the `dc_id` field tells you where to rent to get them back.
+
 ## Sample Output
 
 ```
@@ -221,7 +293,7 @@ A 30-second benchmark could have saved a meaningful fraction of the last row.
 ═══════════════════════════════════════════
 
 === GPU Identity ===
-NVIDIA H100 80GB HBM3, 00000000:1B:00.0, 1650724018113, GPU-74fd4d05-2bcc-aa9e-2691-5c3f13260073
+NVIDIA H100 80GB HBM3, 00000000:1B:00.0, 1234567890123, GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 === Clock Speeds ===
 1980 MHz, 1980 MHz, 2619 MHz, 2619 MHz
@@ -259,6 +331,22 @@ GPUs detected: 1
 64.247.201.52 — Kansas City, Missouri, US
 
 ═══════════════════════════════════════════
+  GPU FINGERPRINT (save this to find same pod again)
+═══════════════════════════════════════════
+pod_id=a8f3c2b1e7
+pod_dc_id=EUR-IS-1
+pod_public_ip=213.181.122.175:10750
+pod_location=Reykjavik, Capital Region, IS
+gpu_count=1
+gemm_avg_ms=0.19
+gemm_tflops=742.2
+mem_bw_gbs=722
+--- per-gpu fingerprint ---
+gpu[0]: name="NVIDIA H100 80GB HBM3" serial=1234567890123 uuid=GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx pci=00000000:1B:00.0
+
+JSON sidecar written to: /tmp/pod-benchmark-20260421-201534.json
+
+═══════════════════════════════════════════
   BENCHMARK COMPLETE
 
   REFERENCE VALUES (good H100 SXM):
@@ -268,6 +356,9 @@ GPUs detected: 1
 
   If GEMM > 0.70 ms or BW < 2000 GB/s,
   consider stopping and getting a new pod.
+
+  Sidecar JSON saved above. To find this exact GPU again later,
+  grep for its uuid or serial across your saved benchmarks.
 ═══════════════════════════════════════════
 ```
 

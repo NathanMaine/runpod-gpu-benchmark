@@ -5,19 +5,44 @@
 # GPU performance before committing to an expensive run.
 # Takes ~30 seconds.
 #
-# Usage: bash pod-test.sh
+# Usage:
+#   bash pod-test.sh                                 # stdout only
+#   bash pod-test.sh | tee pod-$(date +%s).txt       # save human-readable
+#   JSON_OUT=mygpu.json bash pod-test.sh             # also write JSON sidecar
+#                                                    # (default: /tmp/pod-benchmark-<ts>.json)
+#
+# JSON sidecar captures pod id, datacenter, per-GPU UUID and serial,
+# GEMM and memory bandwidth numbers. Use it to identify and request the
+# same specific GPU again later. See "Finding a specific GPU again"
+# in the README.
 # ═══════════════════════════════════════════════════════════
 
-set -euo pipefail
+set -uo pipefail
 
 echo "═══════════════════════════════════════════"
 echo "  RunPod GPU Benchmark"
 echo "═══════════════════════════════════════════"
 echo ""
 
-# 1. GPU Identity
+# 0. RunPod pod and datacenter identifiers (captured early so they land in the log)
+echo "=== RunPod Pod Identity ==="
+POD_ID="${RUNPOD_POD_ID:-unknown}"
+POD_HOSTNAME="${RUNPOD_POD_HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
+POD_DC_ID="${RUNPOD_DC_ID:-${RUNPOD_REGION:-unknown}}"
+POD_PUBLIC_IP="${RUNPOD_PUBLIC_IP:-$(curl -s --max-time 3 ifconfig.me 2>/dev/null || echo unknown)}"
+POD_CITY="$(curl -s --max-time 3 ipinfo.io/city 2>/dev/null || echo unknown)"
+POD_REGION="$(curl -s --max-time 3 ipinfo.io/region 2>/dev/null || echo unknown)"
+POD_COUNTRY="$(curl -s --max-time 3 ipinfo.io/country 2>/dev/null || echo unknown)"
+echo "pod_id=${POD_ID}"
+echo "pod_hostname=${POD_HOSTNAME}"
+echo "pod_public_ip=${POD_PUBLIC_IP}"
+echo "pod_dc_id=${POD_DC_ID}"
+echo "pod_location=${POD_CITY}, ${POD_REGION}, ${POD_COUNTRY}"
+echo ""
+
+# 1. GPU Identity (name, PCI, serial, UUID)
 echo "=== GPU Identity ==="
-nvidia-smi --query-gpu=name,pci.bus_id,serial,uuid --format=csv,noheader
+nvidia-smi --query-gpu=index,name,pci.bus_id,serial,uuid --format=csv,noheader
 echo ""
 
 # 2. Clock speeds (higher = faster)
@@ -54,8 +79,8 @@ echo ""
 
 # 8. ACTUAL GPU COMPUTE BENCHMARK — matrix multiply
 echo "=== GPU Compute (GEMM) ==="
-python3 -c "
-import torch, time
+GEMM_OUTPUT=$(python3 -c "
+import torch, time, json
 
 device = 'cuda'
 # Warmup
@@ -91,8 +116,17 @@ torch.cuda.synchronize()
 t1 = time.perf_counter()
 bw = 10 * 2 * n * 2 / (t1 - t0) / 1e9  # read + write, 2 bytes each
 print(f'Memory bandwidth: {bw:.0f} GB/s')
-" 2>&1
+
+# Also dump machine-readable summary for the sidecar
+print(f'# METRICS avg_ms={avg*1000:.3f} tflops={tflops:.2f} mem_bw_gbs={bw:.1f}')
+" 2>&1)
+echo "$GEMM_OUTPUT"
 echo ""
+
+# Parse metrics out for the JSON sidecar
+GEMM_AVG_MS=$(echo "$GEMM_OUTPUT" | grep -oE "avg_ms=[0-9.]+" | cut -d= -f2 || echo null)
+GEMM_TFLOPS=$(echo "$GEMM_OUTPUT" | grep -oE "tflops=[0-9.]+" | cut -d= -f2 || echo null)
+MEM_BW_GBS=$(echo "$GEMM_OUTPUT" | grep -oE "mem_bw_gbs=[0-9.]+" | cut -d= -f2 || echo null)
 
 # 9. Multi-GPU check
 echo "=== GPU Count ==="
@@ -103,19 +137,124 @@ if [ "$GPU_COUNT" -gt 1 ]; then
     echo "=== All GPUs ==="
     nvidia-smi --query-gpu=index,name,clocks.gr,clocks.max.gr,memory.total,memory.free --format=csv,noheader
     echo ""
+    echo "=== All GPU Identifiers (index, serial, UUID) ==="
+    nvidia-smi --query-gpu=index,serial,uuid --format=csv,noheader
+    echo ""
     echo "=== GPU-to-GPU Bandwidth (NVLink/PCIe) ==="
     nvidia-smi topo -m 2>/dev/null || echo "Topology info not available"
 fi
 echo ""
 
-# 10. Location hint
+# 10. Location echo (already captured above, echo for readability)
 echo "=== Pod Location ==="
-IP=$(curl -s ifconfig.me 2>/dev/null)
-CITY=$(curl -s ipinfo.io/city 2>/dev/null)
-REGION=$(curl -s ipinfo.io/region 2>/dev/null)
-COUNTRY=$(curl -s ipinfo.io/country 2>/dev/null)
-echo "$IP — $CITY, $REGION, $COUNTRY"
+echo "$POD_PUBLIC_IP — $POD_CITY, $POD_REGION, $POD_COUNTRY"
 echo ""
+
+# 11. GPU FINGERPRINT — prominent block so you can grep this across pods
+echo "═══════════════════════════════════════════"
+echo "  GPU FINGERPRINT (save this to find same pod again)"
+echo "═══════════════════════════════════════════"
+echo "pod_id=${POD_ID}"
+echo "pod_dc_id=${POD_DC_ID}"
+echo "pod_public_ip=${POD_PUBLIC_IP}"
+echo "pod_location=${POD_CITY}, ${POD_REGION}, ${POD_COUNTRY}"
+echo "gpu_count=${GPU_COUNT}"
+echo "gemm_avg_ms=${GEMM_AVG_MS}"
+echo "gemm_tflops=${GEMM_TFLOPS}"
+echo "mem_bw_gbs=${MEM_BW_GBS}"
+echo "--- per-gpu fingerprint ---"
+nvidia-smi --query-gpu=index,name,serial,uuid,pci.bus_id --format=csv,noheader | \
+    awk -F', ' '{printf "gpu[%s]: name=\"%s\" serial=%s uuid=%s pci=%s\n", $1, $2, $3, $4, $5}'
+echo ""
+
+# 12. JSON sidecar for machine-readable cross-run comparison
+JSON_OUT="${JSON_OUT:-/tmp/pod-benchmark-$(date -u +%Y%m%d-%H%M%S).json}"
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Build per-GPU JSON via python to avoid quoting pain
+python3 - "$JSON_OUT" "$TIMESTAMP" "$POD_ID" "$POD_HOSTNAME" "$POD_DC_ID" "$POD_PUBLIC_IP" \
+        "$POD_CITY" "$POD_REGION" "$POD_COUNTRY" "$GEMM_AVG_MS" "$GEMM_TFLOPS" "$MEM_BW_GBS" \
+        "$GPU_COUNT" <<'PYEOF'
+import json, subprocess, sys
+
+(out_path, ts, pod_id, hostname, dc, ip, city, region, country,
+ gemm_ms, tflops, mem_bw, gpu_count) = sys.argv[1:14]
+
+def _num(x):
+    try: return float(x)
+    except: return None
+
+# Per-GPU identity
+try:
+    raw = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=index,name,serial,uuid,pci.bus_id,pcie.link.gen.current,pcie.link.width.current,clocks.max.gr",
+         "--format=csv,noheader"],
+        text=True, stderr=subprocess.DEVNULL)
+    gpus = []
+    for line in raw.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 5:
+            gpus.append({
+                "index": int(parts[0]) if parts[0].isdigit() else parts[0],
+                "name": parts[1],
+                "serial": parts[2],
+                "uuid": parts[3],
+                "pci_bus_id": parts[4],
+                "pcie_gen_current": int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None,
+                "pcie_width_current": int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else None,
+                "clocks_max_gr_mhz": _num(parts[7].replace(" MHz","")) if len(parts) > 7 else None,
+            })
+except Exception as e:
+    gpus = [{"error": str(e)}]
+
+# NVLink status summary
+try:
+    nvlink = subprocess.check_output(
+        ["nvidia-smi", "nvlink", "--status"], text=True, stderr=subprocess.DEVNULL)
+    nvlink_lines = [l.strip() for l in nvlink.strip().splitlines()]
+except Exception:
+    nvlink_lines = []
+
+# CPU summary
+try:
+    lscpu = subprocess.check_output(["lscpu"], text=True, stderr=subprocess.DEVNULL)
+    cpu = {}
+    for line in lscpu.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip(); v = v.strip()
+            if k in ("Model name", "CPU(s)", "Thread(s) per core", "Core(s) per socket", "Socket(s)"):
+                cpu[k] = v
+except Exception:
+    cpu = {}
+
+result = {
+    "schema_version": 1,
+    "timestamp": ts,
+    "runpod": {
+        "pod_id": pod_id,
+        "hostname": hostname,
+        "dc_id": dc,
+        "public_ip": ip,
+    },
+    "location": {"city": city, "region": region, "country": country},
+    "gpu_count": int(gpu_count) if gpu_count.isdigit() else None,
+    "gpus": gpus,
+    "gemm": {
+        "avg_ms": _num(gemm_ms),
+        "tflops": _num(tflops),
+        "shape": "4096x4096 bf16",
+        "iterations": 20,
+    },
+    "memory_bandwidth_gbs": _num(mem_bw),
+    "nvlink_status": nvlink_lines,
+    "cpu": cpu,
+}
+
+with open(out_path, "w") as f:
+    json.dump(result, f, indent=2, sort_keys=True)
+print(f"JSON sidecar written to: {out_path}")
+PYEOF
 
 echo "═══════════════════════════════════════════"
 echo "  BENCHMARK COMPLETE"
@@ -127,4 +266,7 @@ echo "  Max GPU clock: 1980 MHz"
 echo ""
 echo "  If GEMM > 0.70 ms or BW < 2000 GB/s,"
 echo "  consider stopping and getting a new pod."
+echo ""
+echo "  Sidecar JSON saved above. To find this exact GPU again later,"
+echo "  grep for its uuid or serial across your saved benchmarks."
 echo "═══════════════════════════════════════════"

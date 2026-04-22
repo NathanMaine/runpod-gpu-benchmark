@@ -1,27 +1,31 @@
 # RunPod GPU Benchmark
 
-A quick benchmark script that measures actual GPU performance on any RunPod pod before you commit to an expensive training run. Takes ~30 seconds.
+A small benchmark script I wrote to measure what I was actually getting on any RunPod pod before I committed to an expensive training run. Takes around 30 seconds on my machine. This repo is a personal record of what I ran and what I saw.
 
-Born out of the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition, where I discovered that GPU quality varies dramatically between pods, even pods with the same GPU model. A bad H100 can cost you 30% more in wasted compute time. This script tells you in 30 seconds whether to keep the pod or kill it.
+I started writing it during the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition, when I noticed (in my own rentals) that GPU performance seemed to vary a lot between pods, even pods listed with the same GPU model. The script is my attempt at a quick sanity check.
 
 ---
 
 > **Unofficial and personal.** This repository is my individual work on my own time and reflects my own opinion only. It is not affiliated with, endorsed by, or representative of RunPod, NVIDIA, OpenAI, or any employer or client.
 >
-> All benchmark data here comes from pods I rented personally between March and April 2026. Results will vary by pod, region, time of day, and the workload you are running. These numbers are indicative, not authoritative. Verify before using them to make budget decisions.
+> **Nothing in this document is stated as fact or as an authoritative claim.** Every number, table, and observation below is a personal measurement from a pod I personally rented between March and April 2026, and every interpretation is my own read of that small sample. I am not an authority on GPU performance, cloud hardware, or RunPod inventory. Your pod, your day, your workload, and your tooling will differ.
+>
+> All benchmark data here comes from pods I rented personally. Results will vary. Treat these numbers as one person's observations, not guidance. Verify before using any of it to make budget decisions.
 >
 > Nothing in this repo is a recommendation to buy any specific product or service.
 
 ---
 
-## Why This Exists
+## Why I started keeping this record
 
-I was competing in OpenAI's Parameter Golf challenge (train the best 16MB language model in 10 minutes on 8xH100s). After running **13 RunPod pods across 5 regions and spending about $360**, I learned the hard way:
+I was competing in OpenAI's Parameter Golf challenge (train the best 16MB language model in 10 minutes on 8xH100s). I rented roughly 13 RunPod pods across 5 regions on my own time and spent something in the neighborhood of $360 of my own money. Over those rentals I noticed a few things in my own runs:
 
-- **Not all H100s are equal.** GEMM performance varied from 0.19 ms (742 TFLOPS) to 0.70+ ms (about 195 TFLOPS) across different pods.
-- **Location matters.** Iceland pods consistently outperformed generic US pods by about 16% (I still cannot explain why).
-- **Clock throttling is silent.** Some pods report 1980 MHz max but run at 1400 MHz under load.
-- **Bad pods waste money.** A 30-second benchmark saves hours of wasted compute at $2-22+/hr.
+- The H100s I rented didn't all behave the same in my GEMM measurements. Among my pods, one measurement came back at 0.19 ms (about 742 TFLOPS by my math), and others came back in the 0.70+ ms range (roughly 195 TFLOPS). I don't know what caused the spread — I'm just reporting what my script printed.
+- In my tiny sample, Iceland pods tended to post faster GEMM numbers than a couple of generic US ones I happened to land on. I can't explain why and I can't generalize from the small number I ran.
+- On some pods the reported max clock was 1980 MHz but what I actually observed under load was lower. I took that as a sign the card might be throttling, but I have not independently verified cause.
+- When a pod measured slowly in my benchmark and I kept it anyway, I spent more per training step. That is where the impulse to measure first came from.
+
+This script is what I now run on every new pod. Your experience and conclusions may differ.
 
 ## Quick Start
 
@@ -37,263 +41,271 @@ cd runpod-gpu-benchmark
 bash pod-test.sh
 ```
 
-No dependencies beyond what's already on a RunPod PyTorch template (`nvidia-smi`, `python3`, `torch`, `curl`, `dd`).
+The RunPod PyTorch templates I've used all had `nvidia-smi`, `python3`, `torch`, `curl`, and `dd` available. If yours is different, the script will likely need adjustment.
 
-## What It Measures
+## What the script tries to measure
 
-| Test | What It Tells You | Why It Matters |
-|------|-------------------|----------------|
-| **GPU Identity** | GPU model, serial, UUID | Verify you got what you're paying for |
-| **Clock Speeds** | Current vs max GPU/memory clocks | Detect thermal throttling |
-| **Memory & PCIe** | VRAM total/free, PCIe generation/width | Ensure full VRAM available, no bottlenecks |
-| **NVLink** | Inter-GPU link status and bandwidth | Critical for multi-GPU DDP training |
-| **CPU** | Model, core count, thread count | Affects data loading pipeline |
-| **Disk Speed** | Sequential write bandwidth (dd) | Slow disk = slow checkpoint saves |
-| **Network** | Download speed to HuggingFace | Affects model/dataset download time |
-| **GEMM** | 4096x4096 bf16 matrix multiply (20 iterations) | **The single most important metric**: directly predicts training step time |
-| **Memory Bandwidth** | 512MB element-wise operation | Predicts memory-bound operation speed |
-| **GPU Count** | Number of GPUs + topology | Multi-GPU: verifies all GPUs present, shows NVLink topology |
-| **Location** | Pod IP, city, region, country | Track which datacenters give best performance |
+These are the signals I personally pay attention to. None of them are the full picture on their own, and I may be weighting them wrong.
 
-## How to Read the Results
+| Test | What I read from it | Why I look at it |
+|------|---------------------|------------------|
+| GPU Identity | Name, serial, UUID, PCI bus id | Confirms the card I was allocated; lets me compare across rentals |
+| Clock Speeds | Current vs max GPU/memory clocks | Big gap between current and max has, in my rentals, correlated with slow runs |
+| Memory and PCIe | VRAM total/free, PCIe generation/width | I want to know what I actually got vs what was listed |
+| NVLink | Inter-GPU link status | For the multi-GPU pods I rented, links that came back inactive predicted slow DDP in my runs |
+| CPU | Model, core count, thread count | In my runs, data loading speed tracked with these |
+| Disk Speed | Sequential write via `dd` | Checkpoint save time on my runs seemed to scale with this |
+| Network | Download from HuggingFace | How long I waited on first-time model and dataset downloads |
+| GEMM | 4096x4096 bf16 matmul, 20 iters | The one I personally pay most attention to (more below) |
+| Memory Bandwidth | 512MB element-wise op | My rough proxy for memory-bound kernel speed |
+| GPU Count | Number of GPUs and topology | Sanity-check that I got what I paid for |
+| Location | Pod IP, city, region, country | I keep this in my notes so I can correlate pod-by-location over time |
 
-### The GEMM Test (Most Important)
+## How I read the numbers
 
-The GEMM (General Matrix Multiply) test runs a 4096x4096 bf16 matrix multiplication 20 times and reports the average time and TFLOPS.
+### Why I pay most attention to the GEMM number
 
-**This is the single best predictor of training speed.** Deep learning training is dominated by matrix multiplications: attention layers, linear projections, MLP blocks. If your GEMM is slow, everything is slow.
+The GEMM test runs a 4096x4096 bf16 matrix multiply 20 times and averages the time.
 
-```
-GEMM 4096x4096 bf16: 0.19 ms  (742.2 TFLOPS)    ← Excellent
-GEMM 4096x4096 bf16: 0.50 ms  (275.0 TFLOPS)    ← Acceptable
-GEMM 4096x4096 bf16: 0.70 ms  (196.0 TFLOPS)    ← Bad, kill this pod
-```
+In my own training runs, my step times roughly tracked with this GEMM number. Attention layers, linear projections, and MLP blocks are dominated by matmuls on the kind of models I was training, so this matched my intuition. I am not claiming it's the "right" metric for your workload — it's the one I've been using.
 
-### Decision Framework
+What I've personally seen in my runs:
 
 ```
-GEMM < 0.25 ms (> 550 TFLOPS)  →  KEEP - exceptional pod, run everything
-GEMM 0.25-0.50 ms (275-550)    →  KEEP - good pod, fine for most workloads
-GEMM 0.50-0.70 ms (196-275)    →  MAYBE - acceptable if no better pods available
-GEMM > 0.70 ms (< 196 TFLOPS)  →  KILL - stop the pod and get a new one
+GEMM 4096x4096 bf16: 0.19 ms  (742.2 TFLOPS)    ← what I'd keep and run on
+GEMM 4096x4096 bf16: 0.50 ms  (275.0 TFLOPS)    ← still fine for my workloads
+GEMM 4096x4096 bf16: 0.70 ms  (196.0 TFLOPS)    ← I've personally killed pods at this level
 ```
 
-### Clock Speed Check
+### How I personally decide whether to keep a pod
+
+My own rough decision rule, not a rule anyone else should follow:
 
 ```
-Max GPU clock: 1980 MHz   ← Normal for H100 SXM
-Max GPU clock: 1410 MHz   ← Throttled (overheating or power-limited)
+GEMM < 0.25 ms (> 550 TFLOPS)  →  I keep it
+GEMM 0.25-0.50 ms (275-550)    →  I keep it
+GEMM 0.50-0.70 ms (196-275)    →  I keep if nothing better is available
+GEMM > 0.70 ms (< 196 TFLOPS)  →  I typically stop the pod and retry
 ```
 
-If the current clock is significantly below max, the GPU is being throttled. This often happens with:
-- Shared pods where other tenants are generating heat
-- Pods in warm datacenters without adequate cooling
-- Power-limited configurations
+This is tuned for the specific workload I was running (parameter-golf style training). Your workload may care about totally different things.
 
-## Baseline Results
-
-Real benchmark data collected across multiple RunPod pods, GPU types, and locations (March to April 2026) during personal pod rentals. Some data comes from the OpenAI Parameter Golf competition, the rest from independent training and inference experiments I ran on my own pods during the same period.
-
-### Single GPU
-
-| GPU | Location | GEMM (ms) | TFLOPS | Mem BW | Max Clock | PCIe | Cost/hr | Verdict |
-|-----|----------|-----------|--------|--------|-----------|------|---------|---------|
-| H100 80GB HBM3 | Kansas City, MO | **0.19** | **742** | 722 GB/s | 1980 MHz | Gen5x16 | $2.69 | EXCEPTIONAL |
-| H100 80GB HBM3 | US (unknown dc) | ~0.55 | ~250 | — | — | — | ~$2.49 (community) | ACCEPTABLE |
-| H100 80GB HBM3 | US (unknown dc) | ~0.55 | ~250 | — | — | — | — | ACCEPTABLE |
-| H200 SXM 141GB HBM3e | Reykjavik, Iceland | — | — | — | — | — | ~$4.00 | Used for full BF16 Gemma 4 26B training (~$28 total, ~7h) |
-| A40 48GB | Montreal, Canada | **4.66** (8192 bf16) | **108.8** | 557 GB/s | — | Gen4x16 | **$0.47** | EXCELLENT value; Gemma 2 27B Q5_K_M = 27.5 tok/s |
-| RTX 5090 32GB | Reykjavik, Iceland | 0.76 | 180.6 | 426 GB/s | 3090 MHz | — | — | Blackwell desktop; **FA3 kernels fail on SM 12.0**, SDPA fallback works |
-
-### Multi-GPU (8xH100 80GB SXM)
-
-| Pod | Location | GEMM (ms) | TFLOPS | NVLink | Clock | CPU | Cost/hr | Verdict |
-|-----|----------|-----------|--------|--------|-------|-----|---------|---------|
-| IS-1 | Reykjavik, Iceland | **0.19** | **734** | 4x26.5 GB/s | 1980 MHz (all 8 GPUs at 96-99%) | Xeon 8468 (160 threads) | ~$21.52 | EXCEPTIONAL |
-| KC-2 | Kansas City, MO | 0.19 | ~740 | 4x26.5 GB/s | 1980 MHz | Xeon 8470 | ~$21.52 | EXCELLENT (second set of 8xH100 runs) |
-
-### Per-GPU TFLOPS varies 4x across pods
+### How I think about clock speed
 
 ```
-Iceland 8xH100 (IS-1):  734 TFLOPS per GPU  (best)
-KC 1xH100 (Pod 3):      742 TFLOPS per GPU  (matches IS-1)
-Generic US 1xH100:      ~250 TFLOPS per GPU (throttled or old hardware)
-RTX 5090 (Iceland):     180 TFLOPS          (consumer tier, 32GB VRAM)
-A40 (Montreal):         108 TFLOPS          (older architecture but great $/TFLOPS)
+Max GPU clock: 1980 MHz   ← what I saw on the H100 SXMs I rented that felt fast
+Max GPU clock: 1410 MHz   ← what I saw on pods that felt slow; I guessed throttling
 ```
 
-### Training Step Times by Pod Quality
+I don't have a way to verify whether the gap is actually thermal or power-related from inside the pod. It's just a signal I've been using.
 
-Same code, same model architecture, different pods. This is why GEMM is the metric that matters:
+## What I measured on my own rentals
 
-| Pod | GPU Quality | Code | Step Time | Steps in 10 min | Relative Speed |
-|-----|------------|------|-----------|-----------------|----------------|
-| IS-1 (Iceland 8x) | 734 TFLOPS | PR #77 LoRA TTT | 51 ms/step | ~11,800 | **1.0x (fastest)** |
-| IS-1 (Iceland 8x) | 734 TFLOPS | PR #462 | 69-72 ms/step | ~8,300 | 0.74x |
+These are the numbers my script printed on pods I rented between March and April 2026, sometimes during Parameter Golf work, sometimes during personal training and inference experiments. They are indicative of one person's experience with a small number of pods and one point in time. I am not claiming they generalize.
+
+### Single GPU (what I saw on my own pods)
+
+| GPU | Location | GEMM (ms) | TFLOPS | Mem BW | Max Clock | PCIe | Cost/hr | My personal read |
+|-----|----------|-----------|--------|--------|-----------|------|---------|------------------|
+| H100 80GB HBM3 | Kansas City, MO | 0.19 | 742 | 722 GB/s | 1980 MHz | Gen5x16 | $2.69 | Felt exceptional in my runs |
+| H100 80GB HBM3 | US (unknown dc) | ~0.55 | ~250 | — | — | — | ~$2.49 (community) | Worked fine for me |
+| H100 80GB HBM3 | US (unknown dc) | ~0.55 | ~250 | — | — | — | — | Similar to the other US one |
+| H200 SXM 141GB HBM3e | Reykjavik, Iceland | — | — | — | — | — | ~$4.00 | What I used for full-BF16 fine-tuning of a ~27B model; the run I ran cost me ~$28 total over ~7 hours |
+| A40 48GB | Montreal, Canada | 4.66 (8192 bf16) | 108.8 | 557 GB/s | — | Gen4x16 | $0.47 | My personal sweet spot for quantized inference on open 27-70B models; Gemma 2 27B Q5_K_M ran at 27.5 tok/s in my test |
+| RTX 5090 32GB | Reykjavik, Iceland | 0.76 | 180.6 | 426 GB/s | 3090 MHz | — | — | Blackwell desktop. In my runs I could not get FA3 kernels to execute on SM 12.0; SDPA fallback worked. Treat this as a single data point from one rental. |
+
+### Multi-GPU (8xH100 80GB SXM, pods I rented)
+
+| Pod | Location | GEMM (ms) | TFLOPS | NVLink | Clock | CPU | Cost/hr | My personal read |
+|-----|----------|-----------|--------|--------|-------|-----|---------|------------------|
+| IS-1 | Reykjavik, Iceland | 0.19 | 734 | 4x26.5 GB/s | 1980 MHz on all 8 GPUs under load | Xeon 8468 (160 threads) | ~$21.52 | The fastest pod I personally rented |
+| KC-2 | Kansas City, MO | 0.19 | ~740 | 4x26.5 GB/s | 1980 MHz | Xeon 8470 | ~$21.52 | Indistinguishable from IS-1 in my runs |
+
+### What the per-GPU TFLOPS variance looked like in my data
+
+The spread across a handful of my own rentals was wider than I expected:
+
+```
+Iceland 8xH100 (IS-1):  734 TFLOPS per GPU  (my fastest)
+KC 1xH100 (Pod 3):      742 TFLOPS per GPU  (matched IS-1 in my run)
+Generic US 1xH100:      ~250 TFLOPS per GPU (noticeably slower in my runs)
+RTX 5090 (Iceland):     180 TFLOPS          (consumer card, 32GB VRAM)
+A40 (Montreal):         108 TFLOPS          (older gen; in my opinion great dollar-per-TFLOPS for what I used it for)
+```
+
+I don't know why the US 1xH100 pods I happened to rent were slower. It could be throttling, older hardware revs, shared hosts, my bad luck, or something I'm not seeing. I'm not drawing a general conclusion — just recording what my script printed.
+
+### Training step times in my own runs
+
+Same code, same model, different pods. This is where the GEMM spread showed up for me at the step level. Just my runs:
+
+| Pod | GPU (per-GPU TFLOPS I measured) | Code | Step Time I saw | Steps in 10 min | My relative speed |
+|-----|--------------------------------|------|-----------------|-----------------|--------------------|
+| IS-1 (Iceland 8x) | 734 TFLOPS | PR #77 LoRA TTT | 51 ms/step | ~11,800 | fastest in my set |
+| IS-1 (Iceland 8x) | 734 TFLOPS | PR #462 | 69-72 ms/step | ~8,300 | 0.74x of above |
 | IS-1 (Iceland 8x) | 734 TFLOPS | PR #505 | 133 ms/step | ~4,500 | 0.38x |
 | KC-1 (KC 1x) | 742 TFLOPS | PR #406 | 568-572 ms/step | ~525 | 0.044x |
 | US-1 (US 1x) | ~250 TFLOPS | PR #406 | ~580 ms/step | ~515 | 0.043x |
 | RTX 5090 (Iceland 1x) | 180 TFLOPS | PR #414 | 326 ms/step | ~1,800 | 0.16x |
 | RTX 5090 (Iceland 1x) | 180 TFLOPS | PR #549 | 385 ms/step | ~1,550 | 0.13x |
 
-**Key insight:** An 8xH100 pod is not just 8x faster: the DDP parallelism and NVLink interconnect make it 10-20x faster per step. The 1xH100 pod gets about 525 steps in 5 minutes while the 8xH100 pod gets about 11,800 steps in 10 minutes.
+My personal interpretation (could be wrong): the 1xH100 to 8xH100 jump was much more than 8x for me. DDP overhead on a single GPU plus not using NVLink seemed to leave a lot on the table. Same code, different pod count, roughly 20x difference in steps per minute in my runs.
 
-### Competition Results by Pod
+### Competition scores I personally achieved on each pod
 
-Actual competition scores (BPB = bits per byte, lower is better) achieved on different pods. These are from OpenAI Parameter Golf runs where the same pipeline was re-executed across different hardware:
+BPB = bits per byte, lower is better. These are my own runs of public code on pods I personally rented:
 
-| Pod | Config | val_bpb | Step Time | Model Size | Under 16MB? |
-|-----|--------|---------|-----------|------------|-------------|
-| IS-1 8xH100 | PR #462 KV=8 MLP=1792 + 10ep TTT | **1.0689** | 72 ms | 19.2 MB | No |
-| IS-1 8xH100 | PR #462 KV=4 MLP=1536 DIM=496 | **1.0935** | 70 ms | 15.37 MB | **Yes** (submission candidate) |
+| Pod | Config | My val_bpb | My step time | Model size | Under 16MB? |
+|-----|--------|------------|--------------|------------|-------------|
+| IS-1 8xH100 | PR #462 KV=8 MLP=1792 + 10ep TTT | 1.0689 | 72 ms | 19.2 MB | No |
+| IS-1 8xH100 | PR #462 KV=4 MLP=1536 DIM=496 | 1.0935 | 70 ms | 15.37 MB | Yes (I used this as a submission candidate) |
 | IS-1 8xH100 | PR #505 no TTT | 1.1279 | 133 ms | 19.8 MB | No |
 | IS-1 8xH100 | PR #77 LoRA TTT | 1.1951 | 51 ms | 15.9 MB | Yes |
 | KC-1 1xH100 | PR #406 baseline | 2.1809 | 572 ms | ~15 MB | Yes |
 | KC-1 1xH100 | PR #406 + reduce-overhead | 2.1787 | 568 ms | ~15 MB | Yes |
-| RTX 5090 (Iceland 1x) | PR #414 100 steps | 2.3155 @ step 100 | 326 ms | N/A (100-step diagnostic) | Yes |
+| RTX 5090 (Iceland 1x) | PR #414 100 steps | 2.3155 @ step 100 | 326 ms | N/A (diagnostic) | Yes |
 
-## Non-competition pod data
+## Other workloads I ran on my own pods
 
-Parallel to the Parameter Golf work, I used the same benchmark on other training and inference workloads I ran on my own pods. Including these for breadth since the cost-per-value profile is very different from record-chasing training:
+Parallel to the Parameter Golf runs, I used the same benchmark on a couple of training and inference experiments of my own. Reporting for breadth because the cost-per-value profile I saw was very different from record-chasing training. Small sample — do not generalize from this.
 
-| Workload | GPU | Location | Measured | Cost | Notes |
-|----------|-----|----------|----------|------|-------|
-| Full BF16 fine-tune of a ~27B parameter open model | H200 SXM | Reykjavik, Iceland | 50-65% GPU util over 6.9 h | ~$28 total | Full precision fit in 141 GB without quantization |
-| Quantized inference eval on a ~27B open model | A40 48GB | Montreal, Canada | 27.5 tok/s, GEMM 108.8 TFLOPS | ~$0.47/hr | Community cloud; good $/tok for quantized inference |
-| Quantized inference eval on a ~32B open model | A40 48GB | Montreal, Canada | queued after the 27B run | ~$0.47/hr | Same pod, queued sequentially |
+| Workload | GPU | Location | What I measured | Cost | My note |
+|----------|-----|----------|-----------------|------|---------|
+| Full BF16 fine-tune of a ~27B parameter open model | H200 SXM | Reykjavik, Iceland | 50-65% GPU util over 6.9 h in my run | ~$28 total for me | Full precision fit in 141 GB without me needing to quantize |
+| Quantized inference eval on a ~27B open model | A40 48GB | Montreal, Canada | 27.5 tok/s, GEMM 108.8 TFLOPS on my test | ~$0.47/hr | Community cloud. In my opinion, a good dollars-per-token for quantized inference |
+| Quantized inference eval on a ~32B open model | A40 48GB | Montreal, Canada | Queued after the 27B run | ~$0.47/hr | Same pod I kept up, queued sequentially |
 
-**Key observation:** For quantized inference of 27-70B class open models, A40 community cloud came out dramatically cheaper than H100 or H200 in my runs, and the speed difference was much smaller than the cost difference. For full-precision fine-tuning of the same model size, the VRAM difference (46 GB vs 141 GB) mattered more to me than raw TFLOPS did.
+My personal takeaway, for my own use: for quantized inference of 27-70B class open models on my workload, A40 community cloud came out cheaper than H100 or H200 in the rentals I ran, and the speed gap felt small compared to the cost gap. For full-precision fine-tunes at the same model size, the VRAM difference mattered more to me than raw TFLOPS. Totally possible your workload works out differently.
 
-## Blackwell GPUs (RTX 5090, DGX Spark)
+## What I ran into on Blackwell GPUs (RTX 5090, DGX Spark GB10)
 
-Blackwell (SM 12.x) pods and dev boxes need special handling:
+I'm documenting this because it caught me off guard when I hit it. I am not stating these as general facts — I am describing what happened on the specific pods and dev boxes I used.
 
-- **Flash Attention 3** (`flash_attn_interface`) builds on Blackwell but the compiled kernels target only SM 80 and SM 90. At runtime on SM 12.x you get `no kernel image is available for execution on the device` even after a successful `pip install -e .`. This has been reported to NVIDIA ([developer forum thread](https://forums.developer.nvidia.com/t/i-keep-failing-to-install-flash-attention-3-in-the-ltx-2-uv-environment/357560)) and upstream ([Dao-AILab/flash-attention#1969](https://github.com/Dao-AILab/flash-attention/issues/1969)).
-- **Flash Attention 2** (`flash_attn` 2.7.4) is pre-installed in the NGC PyTorch container (`nvcr.io/nvidia/pytorch:26.03-py3`) and runs bit-exact to `torch.nn.functional.scaled_dot_product_attention` on Blackwell. Use FA2 or SDPA, not FA3.
-- **Triton shared memory** on Blackwell (about 101 KB per SM on GB10) is less than half of Hopper (about 228 KB). Many modded-nanogpt style kernels hit `OutOfResources: shared memory` at their default block sizes. Reduce `BLOCK_SIZE_N` and `num_stages` or the kernel will not launch.
-- **CUDA 13** and sm_121 full native support is rolling out through 2026. See [PyTorch forums](https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744) and [vLLM #31128](https://github.com/vllm-project/vllm/issues/31128) for current state.
+- I was able to `pip install -e .` the FA3 (`flash_attn_interface`) package inside the NGC PyTorch container on a Blackwell box, but every `flash_attn_func` call I made failed at runtime with `no kernel image is available for execution on the device`. When I looked at the build log, the kernel object files were all named `sm80` or `sm90` — I didn't see any Blackwell-compiled variants. I reported the pattern on the [NVIDIA developer forum thread](https://forums.developer.nvidia.com/t/i-keep-failing-to-install-flash-attention-3-in-the-ltx-2-uv-environment/357560) and on [Dao-AILab/flash-attention#1969](https://github.com/Dao-AILab/flash-attention/issues/1969). Still waiting on a reply. I may be missing something obvious.
+- In the same NGC container, `flash_attn` 2.7.4 (FA2) was pre-installed and it ran for me on Blackwell. In the little test I did, FA2 output and `torch.nn.functional.scaled_dot_product_attention` output were identical, so for my workload I swapped to FA2 or SDPA. I'm not claiming this is the right move for everyone.
+- The Triton custom kernels in some modded-nanogpt style code I was porting hit `OutOfResources: shared memory` on my Blackwell box because they requested about 180 KB of shared memory per kernel instance, and the card I had reports about 101 KB per SM. Cutting `BLOCK_SIZE_N` and `num_stages` got them launching in my setup. Probably not a universal fix.
+- Tooling and runtime support for sm_121 in PyTorch and other libraries was still moving under me while I was using it. See [PyTorch forums on DGX Spark](https://discuss.pytorch.org/t/dgx-spark-gb10-cuda-13-0-python-3-12-sm-121/223744) and [vLLM #31128](https://github.com/vllm-project/vllm/issues/31128) for what people have been reporting. I am not the right person to summarize the current state.
 
-## Cost summary (from real pod spend)
+## What I actually spent
 
-13 pods across 5 regions, about $360 total spend on the Parameter Golf competition alone. Broken down:
+On Parameter Golf alone, I rented something like 13 pods across 5 regions and the total came out to roughly $360 out of my own pocket. Breakdown from my own records:
 
-| Segment | Spend | Notes |
-|---------|-------|-------|
+| Segment | My approximate spend | What I got |
+|---------|----------------------|-----------|
 | Iceland 8xH100 experiments | ~$65 | 3 hours, 10 experiments |
 | KC 1xH100 baseline testing | ~$12 | PR #406 plus T1-T5 |
-| KC 8xH100 secondary runs | ~$55 | Re-verification plus 3-seed competition runs |
-| March 23-26 early pods (US) | ~$40 | Mostly throttled H100s; taught me to benchmark first |
-| RTX 5090 testing (Iceland) | ~$6 | Diagnostic only, 1.5 hours |
-| Compliance H200 training (Iceland) | ~$28 | Full Gemma 4 26B BF16 training |
-| Compliance A40 inference (Montreal) | ~$1.20 | 2.5 hours on quantized eval |
-| Misc overnight pods + failures | ~$150 | Includes the really bad throttled pods I wish I had killed earlier |
+| KC 8xH100 secondary runs | ~$55 | Re-verification plus 3-seed runs |
+| March 23-26 early pods (US) | ~$40 | Mostly pods I'd now benchmark and probably kill sooner |
+| RTX 5090 testing (Iceland) | ~$6 | 1.5 hours of diagnostics |
+| Compliance-adjacent H200 training (Iceland) | ~$28 | Full-precision fine-tune of a ~27B model |
+| Quantized inference on A40 (Montreal) | ~$1.20 | 2.5 hours of eval |
+| Miscellaneous overnight pods and failures | ~$150 | The really slow pods I wish I'd killed sooner |
 
-A 30-second benchmark could have saved a meaningful fraction of the last row.
+A 30-second benchmark could have saved me a meaningful fraction of that last row, is how I read it.
 
-## Tips for Getting Good Pods
+## What's worked for me (not advice)
 
-1. **Try Iceland.** In my testing, Icelandic datacenter pods (EUR-IS region) consistently delivered 0.19 ms GEMM on H100 SXM. The phenomenon repeats across H100 1x, H100 8x, and H200 SXM. It does not appear on RTX 5090 (Blackwell is already at its stock clock, not throttled).
+These are habits from my own rentals. Not recommendations.
 
-2. **Run the benchmark immediately.** Do not start a 2-hour training run before checking. The 30-second benchmark has saved me about $40 multiple times.
-
-3. **Check all GPUs on multi-GPU pods.** Sometimes 7 of 8 GPUs are fine and one is throttled. The script checks all GPUs when it detects more than one.
-
-4. **Kill bad pods fast.** RunPod charges by the minute. A bad pod at $21.52/hr costs $0.36/min. If the benchmark looks bad, kill it immediately and spin up a new one.
-
-5. **For 8xH100 training work, request Iceland explicitly if possible.** The Iceland pod NVLink topology (4 links at 26.5 GB/s per GPU, all 8 GPUs at 1980 MHz sustained) is the combination that made the 10-20x per-step speedup possible in our runs.
-
-6. **For inference of quantized 27-70B models, A40 community cloud is the sweet spot.** $0.47/hr vs $4/hr on H200 and the speed difference is much smaller than 8.5x.
-
-7. **Save your benchmark results.** Redirect output to a file so you can compare across pods:
+1. **I've tried Iceland for H100 SXM work.** In the small number of rentals I did, the Icelandic pods posted the fastest GEMM numbers. I can't explain it and I won't guarantee it for you.
+2. **I run the benchmark before starting a long run.** It's saved me money in my own experience. 30 seconds up front has more than once cost me less than one wasted hour later.
+3. **On multi-GPU pods I spot-check every GPU.** In one of my rentals, 7 of 8 GPUs looked fine and one was noticeably slower.
+4. **If the benchmark looks bad to me, I stop the pod.** RunPod charges by the minute in my experience, so I'd rather eat $0.10 to retry than $40 of slow training.
+5. **For my own 8xH100 training work, Iceland has been my first choice.** In the small sample I ran, the combination of GEMM speed, NVLink, and sustained clocks was what I wanted. Not claiming that generalizes.
+6. **For my own inference of quantized 27-70B open models, A40 community cloud has been a good fit.** Again, for my workload, my setup, my latency tolerance.
+7. **I save the benchmark output.** One command:
    ```bash
    bash pod-test.sh | tee benchmark-$(date +%Y%m%d-%H%M%S).txt
    ```
-
-8. **Network volumes persist.** If you are running repeated experiments, use a RunPod network volume to persist your data and checkpoints. Container storage is lost when the pod is killed.
-
-9. **If your code uses FA3, check the target GPU first.** FA3 is Hopper-only in the shipping binaries. Blackwell (RTX 5090, GB10 DGX Spark, B200 where FA3 support is still rolling out) needs FA2 or SDPA. See the Blackwell section above.
+8. **I use RunPod network volumes for anything I want to survive pod termination.** Container storage on the pods I've rented has not persisted after termination in my experience.
+9. **If my code imports FA3, I check the target GPU's compute capability first.** In my runs, FA3 did not work on Blackwell SM 12.x. FA2 or SDPA did. Your toolchain may work differently.
 
 ## Finding a specific GPU again
 
-If a pod turns out to be exceptional, the script now captures everything you need to request the same hardware later. It writes two things:
+If a pod I rented turned out to be exceptional in my runs, the updated script captures everything I personally need to try to request the same hardware back. It writes two things:
 
-1. A **GPU FINGERPRINT** block to stdout with pod id, datacenter, per-GPU UUID and serial, and the actual GEMM and memory bandwidth numbers.
+1. A **GPU FINGERPRINT** block to stdout with pod id, datacenter, per-GPU UUID and serial, and the GEMM and memory bandwidth numbers I measured.
 2. A **JSON sidecar** (default `/tmp/pod-benchmark-<timestamp>.json`, override with `JSON_OUT=path.json`) containing the same data in a machine-readable form.
 
-Save these alongside your training logs so you can cross-reference later.
+I save these alongside my training logs so I can cross-reference later.
 
-### What's captured
+### What the script captures
 
 ```
-pod_id=<runpod pod id, e.g. a8f3c2b1e7>
-pod_dc_id=<datacenter, e.g. EUR-IS-1>
+pod_id=<runpod pod id>
+pod_dc_id=<datacenter>
 pod_public_ip=<ip:port>
 pod_location=<city, region, country>
-gemm_tflops=<measured>
-mem_bw_gbs=<measured>
+gemm_tflops=<my measurement>
+mem_bw_gbs=<my measurement>
 gpu[0]: name="NVIDIA H100 80GB HBM3" serial=<13-digit> uuid=GPU-<hex uuid> pci=<bus id>
 gpu[1]: ...
-...
 ```
 
-UUID is unique to the physical GPU. Two rentals with the same UUID mean you got the same card back.
+In my understanding, UUID is unique to the physical GPU. Two of my rentals with the same UUID in the log would mean I got the same card back. I have not confirmed this with RunPod directly.
 
-### The realistic workflow
+### My workflow for trying to re-rent a specific pod
 
-RunPod does not let you request a specific GPU by UUID directly. What you can do:
+RunPod does not seem to let me request a specific GPU by UUID directly, at least with the CLI I have. What I do instead:
 
-1. **From the fingerprint**, note the `pod_dc_id` and the GPU model that gave you the performance you want. These are the levers you have.
-2. **Rent a pod in that specific datacenter** with the same GPU type. Use the RunPod CLI or API with `--dataCenterId` pinning:
+1. From a saved fingerprint, I note the `pod_dc_id` and the GPU model that performed well for me.
+2. I rent a pod in that same datacenter with the same GPU type using the RunPod CLI:
    ```bash
    runpodctl pod create \
      --name "chasing-good-gpu" \
      --gpu "NVIDIA H100 80GB HBM3" \
      --gpuCount 8 \
      --dataCenterId "EUR-IS-1" \
-     --templateId "<your PyTorch template>"
+     --templateId "<my PyTorch template>"
    ```
-3. **Run this benchmark** on the new pod. Compare the fingerprint JSON to your saved one.
-4. **If the UUID matches**, keep the pod. That's the same physical card.
-5. **If the UUID does not match but performance is equivalent**, this is a peer card in the same DC. Often good enough.
-6. **If performance is degraded**, stop the pod and retry. RunPod charges by the minute, so this loop costs about $0.10 per attempt on a single H100 and $0.35 per attempt on an 8xH100.
+3. I run this benchmark on the new pod.
+4. If the new UUID matches a previously saved fast one, I keep the pod. If performance matches but UUID doesn't, it's a different card of the same class (usually fine for me). If the new one is slow, I stop it and retry.
 
-### Listing available datacenters
+Cost per attempt in my rentals has been roughly $0.10/minute for 1xH100 and $0.35/minute for 8xH100. A few retries to land on a specific card has been cheaper than an hour on a slow one for me.
+
+### Commands I use to inspect RunPod inventory
 
 ```bash
-runpodctl dc list                    # human table
-runpodctl dc list -o json            # machine readable
-runpodctl gpu list --include-unavailable   # what GPU types exist where
+runpodctl dc list                              # datacenters, human-readable
+runpodctl dc list -o json                      # machine-readable
+runpodctl gpu list --include-unavailable       # what GPU types exist and where
 ```
 
-The `dc_id` field from the sidecar maps directly to the `--dataCenterId` flag.
+The `dc_id` from my JSON sidecar maps to the `--dataCenterId` flag.
 
-### Building a personal "known good pods" registry
+### My personal known-good-pods habit
 
-Once you have a handful of benchmarks saved:
+Once I had a handful of sidecar files:
 
 ```bash
-# Find all your sidecar files
 ls -1 /tmp/pod-benchmark-*.json ~/bench-archive/*.json
 
-# Pull out every UUID and its measured TFLOPS
+# With jq
 jq -r '[.timestamp, .runpod.dc_id, .gpus[0].uuid, .gemm.tflops] | @tsv' \
     /tmp/pod-benchmark-*.json 2>/dev/null | sort -k4 -nr
 
-# Or grep if jq isn't installed
+# Without jq
 grep -H "uuid\|tflops" /tmp/pod-benchmark-*.json
 ```
 
-Over enough rentals, you will start to see specific UUIDs reappear — those are your known-good targets, and the `dc_id` field tells you where to rent to get them back.
+Over time I've seen a few specific UUIDs reappear on re-rentals, and the `dc_id` field has been a useful lever for trying to get them back.
 
-## Sample Output
+## Sample output (what I see on a good pod)
 
 ```
 ═══════════════════════════════════════════
   RunPod GPU Benchmark
 ═══════════════════════════════════════════
 
+=== RunPod Pod Identity ===
+pod_id=a8f3c2b1e7
+pod_hostname=some-hostname
+pod_public_ip=213.181.122.175:10750
+pod_dc_id=EUR-IS-1
+pod_location=Reykjavik, Capital Region, IS
+
 === GPU Identity ===
-NVIDIA H100 80GB HBM3, 00000000:1B:00.0, 1234567890123, GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+0, NVIDIA H100 80GB HBM3, 00000000:1B:00.0, 1234567890123, GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 
 === Clock Speeds ===
 1980 MHz, 1980 MHz, 2619 MHz, 2619 MHz
@@ -328,7 +340,7 @@ Memory bandwidth: 722 GB/s
 GPUs detected: 1
 
 === Pod Location ===
-64.247.201.52 — Kansas City, Missouri, US
+213.181.122.175:10750 — Reykjavik, Capital Region, IS
 
 ═══════════════════════════════════════════
   GPU FINGERPRINT (save this to find same pod again)
@@ -349,13 +361,13 @@ JSON sidecar written to: /tmp/pod-benchmark-20260421-201534.json
 ═══════════════════════════════════════════
   BENCHMARK COMPLETE
 
-  REFERENCE VALUES (good H100 SXM):
+  REFERENCE VALUES that my H100 SXM rentals have printed:
   GEMM: < 0.50 ms (> 275 TFLOPS)
   Memory BW: > 2800 GB/s
   Max GPU clock: 1980 MHz
 
-  If GEMM > 0.70 ms or BW < 2000 GB/s,
-  consider stopping and getting a new pod.
+  On my workload, if GEMM > 0.70 ms or BW < 2000 GB/s,
+  I typically stop the pod and try again.
 
   Sidecar JSON saved above. To find this exact GPU again later,
   grep for its uuid or serial across your saved benchmarks.
@@ -364,15 +376,15 @@ JSON sidecar written to: /tmp/pod-benchmark-20260421-201534.json
 
 ## Contributing
 
-If you have run this benchmark on different GPU types (A100, A6000, L40S, H200, B200, etc.) or in different RunPod regions, I would love to add your data to the baseline table. Open a PR or issue with your benchmark output.
+If you run this benchmark on other GPU types or in other RunPod regions, I'd be interested to see the sidecar output. Open a PR or issue with what you saw. I'd rather add more data points than defend the current set as correct.
 
-### Particularly wanted
+### Things I'd personally like to see more data on
 
-- **B200** runtime benchmark (RunPod lists it but I have not rented one yet)
-- **L40S** results, both for training and inference
-- **A6000** multi-GPU NVLink topology
-- **Additional region data points** outside US and Iceland (APAC, EU-DE, CA-MTL)
-- **AMD Instinct MI300X / MI355X** results (separate fork welcome; this script uses `nvidia-smi` only)
+- **B200** (RunPod lists it; I haven't rented one yet)
+- **L40S** for training and inference
+- **A6000** multi-GPU NVLink behavior
+- **Region diversity** beyond US and Iceland (APAC, EU-DE, CA-MTL, etc.)
+- **AMD Instinct MI300X / MI355X** runs; this script uses `nvidia-smi` only, so an AMD fork would be welcome
 
 ## License
 
@@ -382,13 +394,13 @@ MIT
 
 **Nathan Maine** ([@NathanMaine on GitHub](https://github.com/NathanMaine))
 
-This repository is a personal project on my own time. It is not affiliated with and does not represent the position of any employer, client, or organization.
+This repository is a personal project on my own time. It is not affiliated with and does not represent the position of any employer, client, or organization. Everything here is my own observation from pods I personally rented, and my own interpretation of those observations.
 
 Built during the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition. [Issue #396](https://github.com/karpathy/autoresearch/issues/396) on karpathy/autoresearch was filed during this same adventure.
 
 ---
 
-### Related
+### Related personal projects
 
-- **[Parameter Golf Experiment Lab](https://github.com/NathanMaine/parameter-golf-experiment-lab)** — Interactive dashboard visualizing 352 submissions and 46+ experiments from the competition
-- **[NVIDIA Developer Forum: Flash Attention 3 on DGX Spark](https://forums.developer.nvidia.com/t/i-keep-failing-to-install-flash-attention-3-in-the-ltx-2-uv-environment/357560)** — Thread where I documented the FA3 build success / runtime failure pattern on Blackwell SM 12.1
+- **[Parameter Golf Experiment Lab](https://github.com/NathanMaine/parameter-golf-experiment-lab)** — my personal dashboard for the competition
+- **[NVIDIA Developer Forum: Flash Attention 3 on DGX Spark](https://forums.developer.nvidia.com/t/i-keep-failing-to-install-flash-attention-3-in-the-ltx-2-uv-environment/357560)** — where I posted the FA3 behavior I observed on Blackwell SM 12.1

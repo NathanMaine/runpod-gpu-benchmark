@@ -404,3 +404,15 @@ Built during the [OpenAI Parameter Golf](https://github.com/openai/parameter-gol
 
 - **[Parameter Golf Experiment Lab](https://github.com/NathanMaine/parameter-golf-experiment-lab)** — my personal dashboard for the competition
 - **[NVIDIA Developer Forum: Flash Attention 3 on DGX Spark](https://forums.developer.nvidia.com/t/i-keep-failing-to-install-flash-attention-3-in-the-ltx-2-uv-environment/357560)** — where I posted the FA3 behavior I observed on Blackwell SM 12.1
+
+### Complementary tooling by other Parameter Golf participants
+
+This repo focuses on the **hardware layer**: confirming a RunPod pod's GPU is actually fast, capturing per-GPU UUIDs, and cross-referencing good cards across rentals. It does not validate submissions, bootstrap a pod from scratch, or run sweep configs.
+
+If you want the **pipeline layer** (bootstrapping, smoke tests, submission validation, sweep configs), [@Bortlesboat](https://github.com/Bortlesboat) published three small companion repos in the [openai/parameter-golf discussion #1631](https://github.com/openai/parameter-golf/discussions/1631) that cover that ground. I have not worked with them directly, so what I say below is just my read of their READMEs, not a review or endorsement:
+
+- **[parameter-golf-runpod-starter](https://github.com/Bortlesboat/parameter-golf-runpod-starter)** — bash scripts that clone the challenge repo, preflight the pod, download the FineWeb cache, run 1xH100 and 8xH100 smoke runs, and scaffold a record folder. Designed for "fresh pod to first run" quickly. Author reports an 8xH100 smoke finishing in about 7m15s at $21.52/hr on the official RunPod template.
+- **[parameter-golf-size-checker](https://github.com/Bortlesboat/parameter-golf-size-checker)** — Python CLI that validates a candidate record folder against the challenge rules: required files, 16,000,000-byte cap, parsing of the official training-log footer, and drafting of `submission.json`. Useful pre-PR gate.
+- **[parameter-golf-sweeps](https://github.com/Bortlesboat/parameter-golf-sweeps)** — JSON-config sweep runner that executes 3-10 training variants sequentially, parses each log's footer, and writes `summary.csv` and `summary.md` ranked by `val_bpb`.
+
+Short version of my mental model: if you need the "is this pod's pipeline producing a valid submission" question answered, their repos are probably where to start. If you need the "is this specific GPU the one I want" question answered, use this repo. They are mostly orthogonal.

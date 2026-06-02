@@ -14,6 +14,8 @@ Two things happened during and after the competition that I didn't expect and wa
 
 > "Mid-competition, a participant named Nathan Maine built a 30-second GPU benchmark script for Runpod pods and shared it with other competitors. Nobody asked him to. That kind of tooling gets built when the infrastructure is part of your workflow, not just a resource you're renting."
 
+![Passage from the RunPod blog post naming Nathan Maine for building and sharing a 30-second GPU benchmark script for RunPod pods.](images/runpod-blog-nathan-maine-callout.png)
+
 ![Header of the RunPod blog post, "OpenAI Parameter Golf: what 1,100 researchers built in six weeks," published May 12, 2026.](images/runpod-blog-header.png)
 
 ![Passage from the RunPod blog post naming Nathan Maine for building and sharing a 30-second GPU benchmark script for RunPod pods.](images/runpod-blog-nathan-maine-callout.png)

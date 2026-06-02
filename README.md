@@ -18,8 +18,6 @@ Two things happened during and after the competition that I didn't expect and wa
 
 ![Header of the RunPod blog post, "OpenAI Parameter Golf: what 1,100 researchers built in six weeks," published May 12, 2026.](images/runpod-blog-header.png)
 
-![Passage from the RunPod blog post naming Nathan Maine for building and sharing a 30-second GPU benchmark script for RunPod pods.](images/runpod-blog-nathan-maine-callout.png)
-
 That sentence is the reason I cleaned up the repo and added the GPU fingerprint and JSON sidecar. I'm glad it turned out to be useful.
 
 **RunPod containers contribution, April 2026.** Separately from the benchmark, I filed [issue #114](https://github.com/runpod/containers/issues/114) in the runpod/containers repo documenting a silent pip fallback that was causing PyTorch 2.8.0 cu128 templates to install 2.4.1 instead, with full root-cause analysis and two related support tickets. I followed up with [PR #115](https://github.com/runpod/containers/pull/115) adding PyTorch version verification to catch the fallback before it silently installed the wrong version. RunPod maintainer [@max4c](https://github.com/max4c) closed PR #115 in favor of a hardened version:

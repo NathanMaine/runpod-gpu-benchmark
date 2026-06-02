@@ -10,9 +10,13 @@ I started writing it during the [OpenAI Parameter Golf](https://github.com/opena
 
 Two things happened during and after the competition that I didn't expect and want to record here.
 
-**RunPod blog, May 12, 2026.** In their post-competition writeup, [*OpenAI Parameter Golf: what 1,100 researchers built in six weeks*](https://www.runpod.io/blog/openai-parameter-golf-what-1100-researchers-built-in-six-weeks), RunPod's team wrote:
+**RunPod blog, May 12, 2026.** In their post-competition writeup, [*OpenAI Parameter Golf: what 1,100 researchers built in six weeks*](https://www.runpod.io/blog/openai-parameter-golf-runpod-challenge), RunPod's team wrote:
 
 > "Mid-competition, a participant named Nathan Maine built a 30-second GPU benchmark script for Runpod pods and shared it with other competitors. Nobody asked him to. That kind of tooling gets built when the infrastructure is part of your workflow, not just a resource you're renting."
+
+![Header of the RunPod blog post, "OpenAI Parameter Golf: what 1,100 researchers built in six weeks," published May 12, 2026.](images/runpod-blog-header.png)
+
+![Passage from the RunPod blog post naming Nathan Maine for building and sharing a 30-second GPU benchmark script for RunPod pods.](images/runpod-blog-nathan-maine-callout.png)
 
 That sentence is the reason I cleaned up the repo and added the GPU fingerprint and JSON sidecar. I'm glad it turned out to be useful.
 
@@ -21,8 +25,6 @@ That sentence is the reason I cleaned up the repo and added the GPU fingerprint 
 > "Closing in favor of a new PR that includes both the original verification logic and additional hardening (explicit error messages, non-empty guards, word-boundary anchoring). [Nathan Maine] your original commit is preserved — thank you for the excellent contribution and root cause analysis!"
 
 The follow-on [PR #116](https://github.com/runpod/containers/pull/116) opens with "Based on the excellent work by [Nathan Maine] in #115" and preserves my original commit (`234eb39a`) as the first commit in its history.
-
-**karpathy/autoresearch, March 2026.** I filed [issue #396](https://github.com/karpathy/autoresearch/issues/396) documenting why Claude Code can't run autonomously on default root-only cloud GPU environments (the `--dangerously-skip-permissions` block that hits RunPod, Lambda, Vast.ai, and similar), with a suggested fix and the edge cases involved (git ownership, file permissions, data-directory verification). Another contributor, Anmol Mishra ([@anmolxlight](https://github.com/anmolxlight)), implemented that fix in [PR #398](https://github.com/karpathy/autoresearch/pull/398), a `setup-cloud.sh` script, noting it "follows the suggested fix from issue #396 and handles all the edge cases mentioned." I did not author that PR, and it is open (not yet merged) as of June 2026, but the solution started with my issue, and I validated the implementation in the PR thread, confirming the `setup-cloud.sh` approach held up cleanly across roughly a month of autonomous RunPod H100 research loops with no regressions.
 
 ---
 
@@ -416,7 +418,7 @@ MIT
 
 This repository is a personal project on my own time. It is not affiliated with and does not represent the position of any employer, client, or organization. Everything here is my own observation from pods I personally rented, and my own interpretation of those observations.
 
-Built during the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition. [Issue #396](https://github.com/karpathy/autoresearch/issues/396) on karpathy/autoresearch was filed during this same adventure.
+Built during the [OpenAI Parameter Golf](https://github.com/openai/parameter-golf) competition.
 
 ---
 
